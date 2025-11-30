@@ -1,0 +1,1252 @@
+#!/usr/bin/env php
+<?php
+/**
+ * ApexPHP - Gerador de CRUD
+ *
+ * Uso:
+ *   php apexphp make:crud --table=accounts
+ *   php apexphp make:crud --model=Account
+ * 
+ *   php apexphp make:swagger
+ *   php apexphp make:swagger --format=yaml
+ *   php apexphp make:swagger --output=custom/path/swagger.json
+ */
+
+require_once __DIR__ . "/vendor/autoload.php";
+require_once __DIR__ . "/app/Helpers/helpers.php";
+
+use Illuminate\Database\Capsule\Manager as Capsule;
+use Framework\Swagger\SwaggerGenerator;
+
+// Carregar .env
+$dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
+$dotenv->load();
+
+// Configurar banco de dados
+$capsule = new Capsule();
+$capsule->addConnection([
+    "driver" => env("DB_DRIVER", "mysql"),
+    "host" => env("DB_HOST", "localhost"),
+    "port" => env("DB_PORT", "3306"),
+    "database" => env("DB_DATABASE"),
+    "username" => env("DB_USERNAME"),
+    "password" => env("DB_PASSWORD"),
+    "charset" => env("DB_CHARSET", "utf8mb4"),
+    "collation" => env("DB_COLLATION", "utf8mb4_unicode_ci"),
+    "prefix" => env("DB_PREFIX", ""),
+]);
+$capsule->setAsGlobal();
+$capsule->bootEloquent();
+
+# Dados da cli
+$cli = new League\CLImate\CLImate;
+$args = $cli->arguments;
+
+
+$commandsPermited = ['make:crud', 'make:swagger', 'db:test'];
+
+$args->add([
+    'command' => [
+        'prefix' => false,
+        'description' => 'Comando a ser executado',
+    ],
+    'table' => [
+        'prefix' => false,
+        'longPrefix' => 'table',
+        'description' => 'Nome da tabela para geração do CRUD',
+    ],
+    'model' => [
+        'prefix' => false,
+        'longPrefix' => 'model',
+        'description' => 'Nome do model para geração do CRUD',
+    ],
+    'only' => [
+        'prefix' => false,
+        'longPrefix' => 'only',
+        'description' => 'Componentes a serem gerados (model, controller, views, api)',
+    ],
+    'except' => [
+        'prefix' => false,
+        'longPrefix' => 'except',
+        'description' => 'Componentes a serem ignorados (model, controller, views, api)',
+    ],
+    'format' => [
+        'prefix' => false,
+        'longPrefix' => 'format',
+        'description' => 'Formato do arquivo de saída (php, json)',
+    ],
+    'output' => [
+        'prefix' => false,
+        'longPrefix' => 'output',
+        'description' => 'Caminho do arquivo de saída',
+    ],
+]);
+
+$args->parse();
+
+$command = $args->get('command');
+
+if (!in_array($command, $commandsPermited)) {
+    $cli->error("Comando inválido. \n  Use um dos comandos permidos: " . implode(', ', $commandsPermited));
+    exit(1);
+}
+
+if ($command == 'db:test') {
+    $cli->info("🚀 Testando conexão com banco de dados...");
+    try {
+        Capsule::select("SELECT 1");
+        $cli->success("✓ Conexão com banco OK\n\n");
+    } catch (\Exception $e) {
+        $cli->error("Erro ao conectar ao banco de dados: " . $e->getMessage());
+
+        $cli->warning("💡 Possíveis soluções:\n");
+
+        if (strpos($e->getMessage(), 'Access denied') !== false) {
+            $cli->warning("   1. Verifique o usuário e senha no arquivo .env\n");
+            $cli->warning("   2. Tente conectar manualmente: mysql -u " . getenv("DB_USERNAME") . " -p\n");
+        } elseif (strpos($e->getMessage(), 'Connection refused') !== false) {
+            $cli->warning("   1. Verifique se o MySQL está rodando\n");
+            $cli->warning("   2. macOS: brew services start mysql\n");
+            $cli->warning("   3. Linux: sudo service mysql start\n");
+        } elseif (strpos($e->getMessage(), 'Unknown database') !== false) {
+            $cli->warning("   1. Crie o banco de dados: CREATE DATABASE " . getenv("DB_DATABASE") . ";\n");
+            $cli->warning("   2. Ou mude o DB_DATABASE no .env para um banco existente\n");
+        }
+
+        exit(1);
+    }
+
+    // Listar tabelas
+    $cli->info("📊 Listando tabelas do banco...\n");
+    try {
+        $tables = Capsule::select("SHOW TABLES");
+
+        if (empty($tables)) {
+            $cli->warning("⚠️  Nenhuma tabela encontrada\n");
+            $cli->warning("💡 Execute as migrations: php vendor/bin/phinx migrate\n\n");
+        } else {
+            $cli->success("✓ Tabelas encontradas:\n");
+            foreach ($tables as $table) {
+                $tableName = array_values((array) $table)[0];
+                $cli->info("   - {$tableName}\n");
+            }
+            $cli->info("\n");
+        }
+    } catch (\Exception $e) {
+        $cli->error("❌ Erro ao listar tabelas: " . $e->getMessage() . "\n\n");
+
+        exit(1);
+    }
+
+    $cli->success("✅ Teste de conexão concluído!\n");
+
+    exit(0);
+}
+
+if ($command == 'make:swagger') {
+    $format = $args->get('format') ? $args->get('format') : 'json';
+    $output = $args->get('output') ? $args->get('output') : null;
+
+    $cli->info("🚀 Gerando Swagger...");
+    $cli->info("   Format: {$format}");
+    $cli->info("   Output: {$output}");
+    $cli->info("\n");
+    generateSwagger($format, $output);
+    exit(0);
+}
+
+if ($command == 'make:crud') {
+    $table = $args->get('table');
+    $model = $args->get('model');
+    $only = $args->get('only');
+    $except = $args->get('except');
+
+    if (empty($table) && empty($model)) {
+        $cli->error("Erro: Informe --table=nome_tabela ou --model=NomeModel");
+
+        $cli->info("Exemplos:");
+        $cli->info("  php apexphp make:crud --table=accounts");
+        $cli->info("  php apexphp make:crud --model=Account");
+        $cli->info("  php apexphp make:crud --table=products --only=model,api");
+        $cli->info("  php apexphp make:crud --table=products --except=views");
+        exit(1);
+    }
+
+    // Determinar o que será gerado
+    $generateAll = !isset($only) && !isset($except);
+    $generateModel = $generateAll;
+    $generateController = $generateAll;
+    $generateViews = $generateAll;
+    $generateApi = $generateAll;
+
+    // Processar --only (gera apenas os especificados)
+    if (isset($only)) {
+        $only = array_map('trim', explode(',', strtolower($only)));
+        $generateModel = in_array('model', $only);
+        $generateController = in_array('controller', $only) || in_array('web', $only);
+        $generateViews = in_array('views', $only) || in_array('view', $only);
+        $generateApi = in_array('api', $only);
+    }
+
+    // Processar --except (gera tudo exceto os especificados)
+    if (isset($except)) {
+        $except = array_map('trim', explode(',', strtolower($except)));
+        if (in_array('model', $except))
+            $generateModel = false;
+        if (in_array('controller', $except) || in_array('web', $except))
+            $generateController = false;
+        if (in_array('views', $except) || in_array('view', $except))
+            $generateViews = false;
+        if (in_array('api', $except))
+            $generateApi = false;
+    }
+
+    // Determinar nome da tabela e model
+    if (!empty($table)) {
+        $tableName = $table;
+        $modelName = str_singular(ucfirst(camel_case($tableName)));
+    } else {
+        $modelName = $model;
+        $tableName = str_plural(snake_case($modelName));
+    }
+
+    $controllerName = $modelName . "sController";
+    $viewFolder = strtolower(str_plural($modelName));
+
+    $cli->info("🚀 Gerando CRUD...");
+    $cli->info("   Tabela: {$tableName}");
+    $cli->info("   Model: {$modelName}");
+    $cli->info("   Controller: {$controllerName}");
+    $cli->info("   Views: resources/views/{$viewFolder}/");
+    $cli->info("\n📦 Componentes a gerar:\n");
+    $cli->info("   " . ($generateModel ? "✓" : "✗") . " Model");
+    $cli->info("   " . ($generateController ? "✓" : "✗") . " Controller Web");
+    $cli->info("   " . ($generateViews ? "✓" : "✗") . " Views");
+    $cli->info("   " . ($generateApi ? "✓" : "✗") . " API Controller");
+    $cli->info("\n");
+
+    // Verificar se a tabela existe
+    try {
+        $columns = Capsule::select("SHOW COLUMNS FROM {$tableName}");
+    } catch (\Exception $e) {
+        $cli->error("❌ Erro: Tabela '{$tableName}' não encontrada no banco de dados!");
+        $cli->error("   Execute as migrations primeiro: php vendor/bin/phinx migrate");
+        exit(1);
+    }
+
+    // Processar colunas
+    $fields = [];
+    $fillable = [];
+    $timestamps = false;
+
+    foreach ($columns as $column) {
+        $fieldName = $column->Field;
+
+        // Pular campos especiais
+        if (
+            in_array($fieldName, ["id", "created_at", "updated_at", "deleted_at"])
+        ) {
+            if (in_array($fieldName, ["created_at", "updated_at"])) {
+                $timestamps = true;
+            }
+            continue;
+        }
+
+        $fields[] = [
+            "name" => $fieldName,
+            "type" => $column->Type,
+            "null" => $column->Null === "YES",
+            "key" => $column->Key,
+            "default" => $column->Default,
+        ];
+
+        $fillable[] = $fieldName;
+    }
+
+    // Gerar componentes conforme flags
+    if ($generateModel) {
+        generateModel($modelName, $tableName, $fillable, $timestamps);
+    }
+
+    if ($generateController) {
+        generateController($modelName, $controllerName, $viewFolder, $fillable);
+    }
+
+    if ($generateViews) {
+        generateViews($modelName, $viewFolder, $fields);
+    }
+
+    if ($generateApi) {
+        generateApiController($modelName, $viewFolder, $fields);
+    }
+
+    // Mensagem de sucesso
+    $cli->success("\n✅ CRUD gerado com sucesso!\n\n");
+
+    // Próximos passos personalizados
+    $cli->info("📝 Próximos passos:\n");
+
+    $stepNum = 1;
+
+    if ($generateViews && $generateController) {
+        $cli->info("   {$stepNum}. Acesse http://localhost:8000/{$viewFolder}/list\n");
+        $stepNum++;
+    }
+
+    if ($generateApi) {
+        $cli->info("   {$stepNum}. API disponível em http://localhost:8000/api/{$viewFolder}\n");
+        $stepNum++;
+        $cli->info("   {$stepNum}. Gere documentação Swagger: php generate-swagger\n");
+        $stepNum++;
+    }
+
+    $cli->info("   {$stepNum}. Personalize os arquivos gerados conforme necessário\n");
+    $stepNum++;
+
+    if ($generateController || $generateApi) {
+        $cli->info("   {$stepNum}. Adicione validações no" . ($generateController && $generateApi ? "s Controllers" : " Controller") . "\n");
+    }
+
+    $cli->info("\n");
+
+
+}
+
+
+
+// ===================================================================
+// FUNÇÕES DE GERAÇÃO DO SWAGGER
+// ===================================================================
+function generateSwagger($format = null, $output = null)
+{
+    global $cli;
+
+    try {
+        $cli->info("🚀 Gerando documentação Swagger/OpenAPI...");
+
+        // Criar gerador
+        $generator = new SwaggerGenerator('/api');
+
+        // Gerar documentação
+        $cli->info("📝 Analisando controllers API...");
+        $spec = $generator->generate();
+
+        $cli->info("✓ Encontrados " . count($spec['paths']) . " endpoints");
+        $cli->info("✓ Encontrados " . count($spec['tags']) . " recursos");
+        $cli->info("✓ Gerados " . count($spec['components']['schemas']) . " schemas");
+
+        // Salvar arquivos
+        $publicDir = __DIR__ . '/public/_docs';
+        if (!is_dir($publicDir)) {
+            mkdir($publicDir, 0755, true);
+        }
+
+        // JSON (sempre gerar)
+        $jsonPath = $output ?? $publicDir . '/swagger.json';
+        $generator->saveToFile($jsonPath);
+        $cli->info("✓ Arquivo JSON salvo: {$jsonPath}");
+
+        // YAML (opcional)
+        if ($format === 'yaml' || $format === 'both') {
+            $yamlPath = str_replace('.json', '.yaml', $jsonPath);
+            $generator->saveToYaml($yamlPath);
+            $cli->info("✓ Arquivo YAML salvo: {$yamlPath}");
+        }
+
+        $cli->info("\n✅ Documentação gerada com sucesso!\n\n");
+        $cli->info("📖 Próximos passos:\n");
+        $cli->info("   1. Acesse http://localhost:8000/docs para ver a documentação\n");
+        $cli->info("   2. O arquivo está disponível em: {$jsonPath}\n");
+        $cli->info("   3. Importe no Postman/Insomnia para testar\n\n");
+
+    } catch (\Exception $e) {
+        $cli->error("❌ Erro ao gerar documentação: " . $e->getMessage());
+        $cli->error("Stack trace:\n" . $e->getTraceAsString());
+        exit(1);
+    }
+}
+
+
+
+// ===================================================================
+// FUNÇÕES DE GERAÇÃO DO CRUD
+// ===================================================================
+
+function generateModel($modelName, $tableName, $fillable, $timestamps)
+{
+    $fillableStr = "'" . implode("', '", $fillable) . "'";
+    $timestampsStr = $timestamps ? "true" : "false";
+
+    $content = <<<PHP
+    <?php
+
+    namespace App\Models;
+
+    use Illuminate\Database\Eloquent\Model;
+
+    class {$modelName} extends Model
+    {
+        protected \$table = '{$tableName}';
+
+        protected \$fillable = [{$fillableStr}];
+
+        public \$timestamps = {$timestampsStr};
+
+        // Relacionamentos
+        // Exemplo:
+        // public function user()
+        // {
+        //     return \$this->belongsTo(User::class);
+        // }
+    }
+
+    PHP;
+
+    $path = __DIR__ . "/app/Models/{$modelName}.php";
+
+    if (file_exists($path)) {
+        echo "\n\n❌ Erro: Model 'app/Models/{$modelName}.php' já existe!\n\n";
+        exit(1);
+    }
+
+    file_put_contents($path, $content);
+    echo "✓ Model criado: app/Models/{$modelName}.php\n";
+}
+
+function generateController($modelName, $controllerName, $viewFolder, $fields)
+{
+    $modelVar = lcfirst($modelName);
+    $modelVarPlural = str_plural($modelVar);
+    $requiredFieldsStr = "'" . implode("', '", $fields) . "'";
+
+    $content = <<<PHP
+    <?php
+
+    namespace App\Controllers;
+
+    use App\Models\\{$modelName};
+    use App\Attributes\PublicRoute;
+    use App\Attributes\Auth;
+
+    use Framework\Validation\Validation;
+
+    class {$controllerName} extends BaseController
+    {
+        /**
+         * Lista todos os registros
+         */
+        #[PublicRoute]
+        public function getList()
+        {
+            \$page = \$this->request->input('page', 1);
+            \${$modelVarPlural} = {$modelName}::paginate(config('app.per_page'), ['*'], 'page', \$page);
+
+            return \$this->render('{$viewFolder}.list', compact('{$modelVarPlural}'));
+        }
+
+        /**
+         * Exibe um registro específico
+         */
+        #[Auth]
+        public function getShow(int \$id)
+        {
+            \${$modelVar} = {$modelName}::findOrFail(\$id);
+
+            return \$this->render('{$viewFolder}.show', compact('{$modelVar}'));
+        }
+
+        /**
+         * Formulário de criação
+         */
+        #[Auth]
+        public function getCreate()
+        {
+            return \$this->render('{$viewFolder}.create');
+        }
+
+        /**
+         * Salva um novo registro
+         */
+        #[Auth]
+        public function postCreate()
+        {
+            \$data = \$this->request->all();
+
+            // Validação
+            \$validation = new Validation(\$data);
+            \$validation->rule('required', [{$requiredFieldsStr}])->message('O campo {field} é obrigatório')->labels([
+                //{$requiredFieldsStr}
+            ]);   
+
+            // TODO: Adicionar validações específicas
+            // \$validation->rule('email', 'email_field')->message('O campo {field} tem que ser um email')->label("Label");
+            // \$validation->rule('lengthMin', 'name', 3)->message('O campo {field} tem que ter pelo menos 3 caracteres')->label("Label");
+            // \$validation->rule('lengthMax', 'name', 100)->message('O campo {field} tem que ter no máximo 100 caracteres')->label("Label");
+
+            // \$validation->labels([
+            //    'name' => 'Nome',
+            //    'email' => 'E-mail',
+            //    'password' => 'Senha'
+            //]);
+
+            if (!\$validation->validate()) {
+                \$this->session->setFlash('error', \$validation->getErrors());
+                \$this->session->setOldInput(\$data);
+
+                return \$this->redirect('/{$viewFolder}/create');
+            }
+
+            \${$modelVar} = {$modelName}::create(\$data);
+
+            \$this->session->setFlash('success', 'Registro criado com sucesso!');
+
+            return \$this->redirect('/{$viewFolder}/show/' . \${$modelVar}->id);
+        }
+
+        /**
+         * Formulário de edição
+         */
+        #[Auth]
+        public function getEdit(int \$id)
+        {
+            \${$modelVar} = {$modelName}::findOrFail(\$id);
+            return \$this->render('{$viewFolder}.edit', compact('{$modelVar}'));
+        }
+
+        /**
+         * Atualiza um registro
+         */
+        #[Auth]
+        public function putUpdate(int \$id)
+        {
+            \${$modelVar} = {$modelName}::findOrFail(\$id);
+            \$data = \$this->request->all();
+
+            // Validação
+            \$validation = new Validation(\$data);
+            \$validation->rule('required', [{$requiredFieldsStr}])->message('O campo {field} é obrigatório')->labels([
+                //{$requiredFieldsStr}
+            ]);   
+
+            // TODO: Adicionar validações específicas
+            // \$validation->rule('email', 'email_field')->message('O campo {field} tem que ser um email')->label("Label");
+            // \$validation->rule('lengthMin', 'name', 3)->message('O campo {field} tem que ter pelo menos 3 caracteres')->label("Label");
+            // \$validation->rule('lengthMax', 'name', 100)->message('O campo {field} tem que ter no máximo 100 caracteres')->label("Label");
+
+            // \$validation->labels([
+            //    'name' => 'Nome',
+            //    'email' => 'E-mail',
+            //    'password' => 'Senha'
+            //]);
+
+            if (!\$validation->validate()) {
+                \$this->session->setFlash('error', \$validation->getErrors());
+                \$this->session->setOldInput(\$data);
+
+                return \$this->redirect('/{$viewFolder}/edit' . \$id);
+            }            
+
+            \${$modelVar}->update(\$data);
+
+            \$this->session->setFlash('success', 'Registro atualizado com sucesso!');
+
+            return \$this->redirect('/{$viewFolder}/show/' . \$id);
+        }
+
+        /**
+         * Deleta um registro
+         */
+        #[Auth(roles: ['admin'])]
+        public function deleteDelete(int \$id)
+        {
+            \${$modelVar} = {$modelName}::findOrFail(\$id);
+            \${$modelVar}->delete();
+
+            \$this->session->setFlash('success', 'Registro deletado com sucesso!');
+            
+            return \$this->redirect('/{$viewFolder}/list');
+        }
+    }
+
+    PHP;
+
+    $path = __DIR__ . "/app/Controllers/{$controllerName}.php";
+
+    if (file_exists($path)) {
+        echo "\n\n❌ Erro: Controller 'app/Controllers/{$controllerName}.php' já existe!\n\n";
+        exit(1);
+    }
+    file_put_contents($path, $content);
+    echo "✓ Controller criado: app/Controllers/{$controllerName}.php\n";
+}
+
+function generateViews($modelName, $viewFolder, $fields)
+{
+    $dir = __DIR__ . "/resources/views/{$viewFolder}";
+
+    if (!is_dir($dir)) {
+        mkdir($dir, 0755, true);
+    } else {
+        echo "\n\n❌ Erro: Views 'resources/views/{$viewFolder}' já existem!\n\n";
+        exit(1);
+    }
+
+    // list.blade.php
+    generateListView($dir, $modelName, $viewFolder, $fields);
+
+    // show.blade.php
+    generateShowView($dir, $modelName, $viewFolder, $fields);
+
+    // create.blade.php
+    generateCreateView($dir, $modelName, $viewFolder, $fields);
+
+    // edit.blade.php
+    generateEditView($dir, $modelName, $viewFolder, $fields);
+}
+
+function generateListView($dir, $modelName, $viewFolder, $fields)
+{
+    $modelVar = lcfirst($modelName);
+    $modelVarPlural = str_plural($modelVar);
+    $title = ucfirst(str_plural($modelName));
+
+    // Pegar os primeiros 5 campos para exibir na tabela
+    $displayFields = array_slice($fields, 0, 5);
+
+    $thHtml = "<th>ID</th>\n";
+    foreach ($displayFields as $field) {
+        $label = ucfirst(str_replace("_", " ", $field["name"]));
+        $thHtml .= "            <th>{$label}</th>\n";
+    }
+    $thHtml .= "            <th>Ações</th>";
+
+    $tdHtml = "<td>{{ \${$modelVar}->id }}</td>\n";
+    foreach ($displayFields as $field) {
+        $tdHtml .= "            <td>{{ \${$modelVar}->{$field["name"]} }}</td>\n";
+    }
+
+    $content = <<<BLADE
+    @extends('layouts.app')
+
+    @section('title', '{$title}')
+
+    @section('content')
+    <div class="page-header">
+        <h1>{$title}</h1>
+        @if(auth()->check())
+            <a href="/{$viewFolder}/create" class="btn btn-primary">Novo Registro</a>
+        @endif
+    </div>
+
+    <table class="table">
+        <thead>
+            <tr>
+                {$thHtml}
+            </tr>
+        </thead>
+        <tbody>
+            @foreach(\${$modelVarPlural} as \${$modelVar})
+            <tr>
+                {$tdHtml}
+                <td>
+                    <a href="/{$viewFolder}/show/{{ \${$modelVar}->id }}" class="btn btn-sm btn-info">Ver</a>
+                    @if(auth()->check())
+                        <a href="/{$viewFolder}/edit/{{ \${$modelVar}->id }}" class="btn btn-sm btn-warning">Editar</a>
+                        @if(auth()->hasRole('admin'))
+                            <form method="POST" action="/{$viewFolder}/delete/{{ \${$modelVar}->id }}" style="display:inline;">
+                                @csrf
+                                <input type="hidden" name="_method" value="DELETE">
+                                <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Confirma exclusão?')">Deletar</button>
+                            </form>
+                        @endif
+                    @endif
+                </td>
+            </tr>
+            @endforeach
+        </tbody>
+    </table>
+
+    <div class="pagination">
+        @if(\${$modelVarPlural}->currentPage() > 1)
+            <a href="?page={{ \${$modelVarPlural}->currentPage() - 1 }}" class="btn">Anterior</a>
+        @endif
+        <span>Página {{ \${$modelVarPlural}->currentPage() }} de {{ \${$modelVarPlural}->lastPage() }}</span>
+        @if(\${$modelVarPlural}->hasMorePages())
+            <a href="?page={{ \${$modelVarPlural}->currentPage() + 1 }}" class="btn">Próxima</a>
+        @endif
+    </div>
+    @endsection
+
+    BLADE;
+
+    if (file_exists($dir . "/list.blade.php")) {
+        echo "\n\n❌ Erro: View 'resources/views/{$viewFolder}/list.blade.php' já existe!\n\n";
+        exit(1);
+    }
+
+    file_put_contents($dir . "/list.blade.php", $content);
+    echo "✓ View criada: resources/views/{$viewFolder}/list.blade.php\n";
+}
+
+function generateShowView($dir, $modelName, $viewFolder, $fields)
+{
+    $modelVar = lcfirst($modelName);
+    $title = ucfirst($modelName);
+
+    $detailsHtml = "";
+    foreach ($fields as $field) {
+        $label = ucfirst(str_replace("_", " ", $field["name"]));
+        $detailsHtml .= "        <div class=\"detail-row\">\n";
+        $detailsHtml .= "            <strong>{$label}:</strong>\n";
+        $detailsHtml .= "            <span>{{ \${$modelVar}->{$field["name"]} }}</span>\n";
+        $detailsHtml .= "        </div>\n\n";
+    }
+
+    $content = <<<BLADE
+    @extends('layouts.app')
+
+    @section('title', 'Detalhes - {$title}')
+
+    @section('content')
+    <div class="page-header">
+        <h1>Detalhes - {$title}</h1>
+        <div>
+            @if(auth()->check())
+                <a href="/{$viewFolder}/edit/{{ \${$modelVar}->id }}" class="btn btn-warning">Editar</a>
+            @endif
+            <a href="/{$viewFolder}/list" class="btn btn-secondary">Voltar</a>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-body">
+            <div class="detail-row">
+                <strong>ID:</strong>
+                <span>{{ \${$modelVar}->id }}</span>
+            </div>
+
+    {$detailsHtml}    </div>
+    </div>
+    @endsection
+
+    @push('styles')
+    <style>
+    .card {
+        background: white;
+        border-radius: 8px;
+        padding: 2rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .detail-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 1rem 0;
+        border-bottom: 1px solid #ecf0f1;
+    }
+
+    .detail-row:last-child {
+        border-bottom: none;
+    }
+
+    .detail-row strong {
+        color: #2c3e50;
+    }
+    </style>
+    @endpush
+
+    BLADE;
+
+    if (file_exists($dir . "/show.blade.php")) {
+        echo "\n\n❌ Erro: View 'resources/views/{$viewFolder}/show.blade.php' já existe!\n\n";
+        exit(1);
+    }
+    file_put_contents($dir . "/show.blade.php", $content);
+    echo "✓ View criada: resources/views/{$viewFolder}/show.blade.php\n";
+}
+
+function generateCreateView($dir, $modelName, $viewFolder, $fields)
+{
+    $title = "Novo " . ucfirst($modelName);
+
+    $formFieldsHtml = "";
+    foreach ($fields as $field) {
+        $label = ucfirst(str_replace("_", " ", $field["name"]));
+        $inputType = getInputType($field["type"]);
+        $required = !$field["null"] ? "required" : "";
+
+        if ($inputType === "textarea") {
+            $formFieldsHtml .= "        <div class=\"form-group\">\n";
+            $formFieldsHtml .= "            <label for=\"{$field["name"]}\">{$label}</label>\n";
+            $formFieldsHtml .= "            <textarea name=\"{$field["name"]}\" id=\"{$field["name"]}\" class=\"form-control\" rows=\"4\" {$required}>{{ old('{$field["name"]}') }}</textarea>\n";
+            $formFieldsHtml .= "        </div>\n\n";
+        } else {
+            $formFieldsHtml .= "        <div class=\"form-group\">\n";
+            $formFieldsHtml .= "            <label for=\"{$field["name"]}\">{$label}</label>\n";
+            $formFieldsHtml .= "            <input type=\"{$inputType}\" name=\"{$field["name"]}\" id=\"{$field["name"]}\" class=\"form-control\" value=\"{{ old('{$field["name"]}') }}\" {$required}>\n";
+            $formFieldsHtml .= "        </div>\n\n";
+        }
+    }
+
+    $content = <<<BLADE
+    @extends('layouts.app')
+
+    @section('title', '{$title}')
+
+    @section('content')
+    <div class="page-header">
+        <h1>{$title}</h1>
+    </div>
+
+    <div class="card">
+        <form method="POST" action="/{$viewFolder}/create">
+            @csrf
+
+    {$formFieldsHtml}
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Salvar</button>
+                <a href="/{$viewFolder}/list" class="btn btn-secondary">Cancelar</a>
+            </div>
+        </form>
+    </div>
+    @endsection
+
+    BLADE;
+
+    if (file_exists($dir . "/create.blade.php")) {
+        echo "\n\n❌ Erro: View 'resources/views/{$viewFolder}/create.blade.php' já existe!\n\n";
+        exit(1);
+    }
+
+    file_put_contents($dir . "/create.blade.php", $content);
+    echo "✓ View criada: resources/views/{$viewFolder}/create.blade.php\n";
+}
+
+function generateEditView($dir, $modelName, $viewFolder, $fields)
+{
+    $modelVar = lcfirst($modelName);
+    $title = "Editar " . ucfirst($modelName);
+
+    $formFieldsHtml = "";
+    foreach ($fields as $field) {
+        $label = ucfirst(str_replace("_", " ", $field["name"]));
+        $inputType = getInputType($field["type"]);
+        $required = !$field["null"] ? "required" : "";
+
+        if ($inputType === "textarea") {
+            $formFieldsHtml .= "        <div class=\"form-group\">\n";
+            $formFieldsHtml .= "            <label for=\"{$field["name"]}\">{$label}</label>\n";
+            $formFieldsHtml .= "            <textarea name=\"{$field["name"]}\" id=\"{$field["name"]}\" class=\"form-control\" rows=\"4\" {$required}>{{ \${$modelVar}->{$field["name"]} }}</textarea>\n";
+            $formFieldsHtml .= "        </div>\n\n";
+        } else {
+            $formFieldsHtml .= "        <div class=\"form-group\">\n";
+            $formFieldsHtml .= "            <label for=\"{$field["name"]}\">{$label}</label>\n";
+            $formFieldsHtml .= "            <input type=\"{$inputType}\" name=\"{$field["name"]}\" id=\"{$field["name"]}\" class=\"form-control\" value=\"{{ \${$modelVar}->{$field["name"]} }}\" {$required}>\n";
+            $formFieldsHtml .= "        </div>\n\n";
+        }
+    }
+
+    $content = <<<BLADE
+    @extends('layouts.app')
+
+    @section('title', '{$title}')
+
+    @section('content')
+    <div class="page-header">
+        <h1>{$title}</h1>
+    </div>
+
+    <div class="card">
+        <form method="POST" action="/{$viewFolder}/update/{{ \${$modelVar}->id }}">
+            @csrf
+            <input type="hidden" name="_method" value="PUT">
+
+    {$formFieldsHtml}
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Atualizar</button>
+                <a href="/{$viewFolder}/show/{{ \${$modelVar}->id }}" class="btn btn-secondary">Cancelar</a>
+            </div>
+        </form>
+    </div>
+    @endsection
+
+    BLADE;
+
+    if (file_exists($dir . "/edit.blade.php")) {
+        echo "\n\n❌ Erro: View 'resources/views/{$viewFolder}/edit.blade.php' já existe!\n\n";
+        exit(1);
+    }
+
+    file_put_contents($dir . "/edit.blade.php", $content);
+    echo "✓ View criada: resources/views/{$viewFolder}/edit.blade.php\n";
+}
+
+function getInputType($sqlType)
+{
+    $type = strtolower($sqlType);
+
+    if (strpos($type, "int") !== false) {
+        return "number";
+    }
+    if (
+        strpos($type, "decimal") !== false ||
+        strpos($type, "float") !== false ||
+        strpos($type, "double") !== false
+    ) {
+        return "number";
+    }
+    if (strpos($type, "date") !== false) {
+        return "date";
+    }
+    if (strpos($type, "time") !== false) {
+        return "time";
+    }
+    if (strpos($type, "text") !== false) {
+        return "textarea";
+    }
+    if (strpos($type, "email") !== false) {
+        return "email";
+    }
+
+    return "text";
+}
+
+// Helper functions
+function str_singular($str)
+{
+    if (substr($str, -3) === "ies") {
+        return substr($str, 0, -3) . "y";
+    }
+    if (substr($str, -1) === "s") {
+        return substr($str, 0, -1);
+    }
+    return $str;
+}
+
+function str_plural($str)
+{
+    if (substr($str, -1) === "y") {
+        return substr($str, 0, -1) . "ies";
+    }
+    if (substr($str, -1) === "s") {
+        return $str;
+    }
+    return $str . "s";
+}
+
+function snake_case($str)
+{
+    $str = preg_replace("/([A-Z])/", '_$1', $str);
+    return strtolower(trim($str, "_"));
+}
+
+function camel_case($str)
+{
+    return lcfirst(str_replace("_", "", ucwords($str, "_")));
+}
+
+function get_opt()
+{
+    $options = [];
+    foreach ($_SERVER["argv"] as $key => $arg) {
+        if (preg_match("@\-\-(.+)=(.+)@", $arg, $matches)) {
+            $key = $matches[1];
+            $value = $matches[2];
+            $options[$key] = $value;
+        } elseif (preg_match("@\-(.)(.)@", $arg, $matches)) {
+            $key = $matches[1];
+            $value = $matches[2];
+            $options[$key] = $value;
+        }
+    }
+    return $options;
+}
+
+function generateApiController($modelName, $viewFolder, $fields)
+{
+    $modelVar = lcfirst($modelName);
+    $modelVarPlural = str_plural($modelVar);
+    $controllerName = $modelName . "sController";
+
+    // Gerar regras de validação para campos obrigatórios
+    $requiredFields = [];
+    foreach ($fields as $field) {
+        if (!$field["null"]) {
+            $requiredFields[] = "'" . $field["name"] . "'";
+        }
+    }
+    $requiredFieldsStr = implode(", ", $requiredFields);
+
+    $content = <<<PHP
+<?php
+
+namespace App\Controllers\Api;
+
+use App\Controllers\BaseController;
+use App\Models\\{$modelName};
+
+use App\Attributes\PublicRoute;
+use App\Attributes\Auth;
+use App\Attributes\ApiDoc;
+use Framework\Auth\JwtAuth;
+use Framework\Validation\Validation;
+
+class {$controllerName} extends BaseController
+{
+    private JwtAuth \$jwtAuth;
+
+    public function __construct()
+    {
+        parent::__construct();
+        \$this->jwtAuth = app('jwt');
+    }
+
+    /**
+     * GET /api/{$viewFolder}
+     * Lista todos os registros
+     */
+    #[PublicRoute]
+    #[ApiDoc(
+        summary: "Lista todos os {$modelName}",
+        description: "Retorna uma lista paginada de {$modelName}",
+        tags: ["{$modelName}"],
+        responses: [200]
+    )]
+    public function getIndex()
+    {
+        \$page = \$this->request->input('page', 1);
+        \$perPage = \$this->request->input('per_page', 15);
+
+        \${$modelVarPlural} = {$modelName}::paginate(\$perPage, ['*'], 'page', \$page);
+
+        return \$this->success([
+            'data' => \${$modelVarPlural}->items(),
+            'pagination' => [
+                'total' => \${$modelVarPlural}->total(),
+                'per_page' => \${$modelVarPlural}->perPage(),
+                'current_page' => \${$modelVarPlural}->currentPage(),
+                'last_page' => \${$modelVarPlural}->lastPage(),
+                'from' => \${$modelVarPlural}->firstItem(),
+                'to' => \${$modelVarPlural}->lastItem(),
+            ],
+        ]);
+    }
+
+    /**
+     * GET /api/{$viewFolder}/show/{id}
+     * Exibe um registro específico
+     */
+    #[PublicRoute]
+    #[ApiDoc(
+        summary: "Busca um {$modelName} por ID",
+        description: "Retorna os detalhes de um {$modelName} específico",
+        tags: ["{$modelName}"],
+        responses: [200, 404]
+    )]
+    public function getShow(int \$id)
+    {
+        \${$modelVar} = {$modelName}::find(\$id);
+
+        if (!\${$modelVar}) {
+            return \$this->error('Registro não encontrado', null, 404);
+        }
+
+        return \$this->success(\${$modelVar});
+    }
+
+    /**
+     * POST /api/{$viewFolder}/create
+     * Cria um novo registro
+     */
+    #[Auth]
+    #[ApiDoc(
+        summary: "Cria um novo {$modelName}",
+        description: "Cria um novo registro de {$modelName} no banco de dados",
+        tags: ["{$modelName}"],
+        responses: [201, 401, 422]
+    )]
+    public function postCreate()
+    {
+        \$data = \$this->request->all();
+
+        // Validação
+        \$validation = new Validation(\$data);
+        \$validation->rule('required', [{$requiredFieldsStr}])->message('O campo {field} é obrigatório');
+
+        // TODO: Adicionar validações específicas
+        // \$validation->rule('email', 'email_field')->message('O campo {field} tem que ser um email');
+        // \$validation->rule('lengthMin', 'name', 3)->message('O campo {field} tem que ter pelo menos 3 caracteres');
+        // \$validation->rule('lengthMax', 'name', 100)->message('O campo {field} tem que ter no máximo 100 caracteres');
+
+        // \$validation->labels([
+        //    'name' => 'Nome',
+        //    'email' => 'E-mail',
+        //    'password' => 'Senha'
+        //]);
+
+        if (!\$validation->validate()) {
+            return \$this->error('Dados inválidos', \$validation->errors(), 422);
+        }
+
+        \${$modelVar} = {$modelName}::create(\$data);
+
+        return \$this->success(\${$modelVar}, 'Registro criado com sucesso', 201);
+    }
+
+    /**
+     * PUT /api/{$viewFolder}/update/{id}
+     * Atualiza um registro
+     */
+    #[Auth]
+    #[ApiDoc(
+        summary: "Atualiza um {$modelName}",
+        description: "Atualiza todos os dados de um {$modelName} existente",
+        tags: ["{$modelName}"],
+        responses: [200, 401, 404, 422]
+    )]
+    public function putUpdate(int \$id)
+    {
+        \${$modelVar} = {$modelName}::find(\$id);
+
+        if (!\${$modelVar}) {
+            return \$this->error('Registro não encontrado', null, 404);
+        }
+
+        \$data = \$this->request->all();
+
+        // Validação
+        \$validation = new Validation(\$data);
+        \$validation->rule('required', [{$requiredFieldsStr}])->message('O campo {field} é obrigatório');
+
+        // TODO: Adicionar validações específicas
+        // \$validation->rule('email', 'email_field')->message('O campo {field} tem que ser um email');
+        // \$validation->rule('lengthMin', 'name', 3)->message('O campo {field} tem que ter pelo menos 3 caracteres');
+        // \$validation->rule('lengthMax', 'name', 100)->message('O campo {field} tem que ter no máximo 100 caracteres');
+
+        // \$validation->labels([
+        //    'name' => 'Nome',
+        //    'email' => 'E-mail',
+        //    'password' => 'Senha'
+        //]);
+
+        if (!\$validation->validate()) {
+            return \$this->error('Dados inválidos', \$validation->errors(), 422);
+        }
+
+        \${$modelVar}->update(\$data);
+
+        return \$this->success(\${$modelVar}, 'Registro atualizado com sucesso');
+    }
+
+    /**
+     * PATCH /api/{$viewFolder}/update/{id}
+     * Atualiza parcialmente um registro
+     */
+    #[Auth]
+    #[ApiDoc(
+        summary: "Atualiza parcialmente um {$modelName}",
+        description: "Atualiza apenas os campos enviados de um {$modelName}",
+        tags: ["{$modelName}"],
+        responses: [200, 401, 404]
+    )]
+    public function patchUpdate(int \$id)
+    {
+        \${$modelVar} = {$modelName}::find(\$id);
+
+        if (!\${$modelVar}) {
+            return \$this->error('Registro não encontrado', null, 404);
+        }
+
+        \$data = \$this->request->all();
+
+        // Para PATCH, não exigimos todos os campos obrigatórios
+        // TODO: Adicionar validações específicas para os campos enviados
+
+        \${$modelVar}->update(\$data);
+
+        return \$this->success(\${$modelVar}, 'Registro atualizado com sucesso');
+    }
+
+    /**
+     * DELETE /api/{$viewFolder}/delete/{id}
+     * Deleta um registro
+     */
+    #[Auth(roles: ['admin'])]
+    #[ApiDoc(
+        summary: "Deleta um {$modelName}",
+        description: "Remove permanentemente um {$modelName} (requer role admin)",
+        tags: ["{$modelName}"],
+        responses: [200, 401, 403, 404]
+    )]
+    public function deleteDelete(int \$id)
+    {
+        \${$modelVar} = {$modelName}::find(\$id);
+
+        if (!\${$modelVar}) {
+            return \$this->error('Registro não encontrado', null, 404);
+        }
+
+        \${$modelVar}->delete();
+
+        return \$this->success([], 'Registro deletado com sucesso');
+    }
+
+    /**
+     * GET /api/{$viewFolder}/search
+     * Busca registros com filtros
+     */
+    #[PublicRoute]
+    #[ApiDoc(
+        summary: "Busca {$modelName} com filtros",
+        description: "Retorna uma lista paginada de {$modelName} filtrada por parâmetros customizados",
+        tags: ["{$modelName}"],
+        responses: [200]
+    )]
+    public function getSearch()
+    {
+        \$query = {$modelName}::query();
+
+        // TODO: Adicionar filtros específicos
+        // Exemplo:
+        // if (\$search = \$this->request->input('search')) {
+        //     \$query->where('name', 'LIKE', "%{\$search}%");
+        // }
+        // if (\$status = \$this->request->input('status')) {
+        //     \$query->where('status', \$status);
+        // }
+
+        \$page = \$this->request->input('page', 1);
+        \$perPage = \$this->request->input('per_page', 15);
+
+        \${$modelVarPlural} = \$query->paginate(\$perPage, ['*'], 'page', \$page);
+
+        return \$this->success([
+            'data' => \${$modelVarPlural}->items(),
+            'pagination' => [
+                'total' => \${$modelVarPlural}->total(),
+                'per_page' => \${$modelVarPlural}->perPage(),
+                'current_page' => \${$modelVarPlural}->currentPage(),
+                'last_page' => \${$modelVarPlural}->lastPage(),
+            ],
+        ]);
+    }
+}
+
+PHP;
+
+    $dir = __DIR__ . "/app/Controllers/Api";
+    if (!is_dir($dir)) {
+        mkdir($dir, 0755, true);
+    }
+
+    $path = $dir . "/{$controllerName}.php";
+
+    if (file_exists($path)) {
+        echo "\n\n❌ Erro: Controller 'app/Controllers/Api/{$controllerName}' já existe!\n\n";
+        exit(1);
+    }
+
+    file_put_contents($path, $content);
+    echo "✓ API Controller criado: app/Controllers/Api/{$controllerName}.php\n";
+}
+
