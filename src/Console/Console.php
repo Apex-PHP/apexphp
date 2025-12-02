@@ -22,6 +22,8 @@ class Console
         // Na qual serão utilizados por padrao
         $this->loadCommands(__DIR__ . '/Commands', 'Framework\\Console\\Commands\\');
 
+        // Vamos agora carregar os comandos do diretório do app
+        $this->loadCommands(__DIR__ . '/../../app/Commands', 'App\\Commands\\');
     }
 
     /**
@@ -34,9 +36,7 @@ class Console
      */
     private function loadCommands(string $appCommandsDir, string $namespace): void
     {
-
         if (is_dir($appCommandsDir)) {
-
             // Carrega comando a comando do diretório do framework
             $commandFiles = glob($appCommandsDir . '/*Command.php');
 
