@@ -1,0 +1,41 @@
+#!/usr/bin/env php
+<?php
+
+
+/**
+ * Switch to root path
+ */
+chdir(__DIR__);
+
+/**
+ * Carrega o autoloader do composer
+ */
+require __DIR__ . '/vendor/autoload.php';
+
+/**
+ * Carrega as variáveis de ambiente
+ */
+try {
+    \Dotenv\Dotenv::createUnsafeImmutable(__DIR__)->load();
+} catch (\Throwable $th) {
+    trigger_error($th);
+}
+
+use Framework\Console\Console;
+
+// ASCII Art Banner
+$banner = <<<'ASCII'
+    ___                    ____  __  ______
+   /   |  ____  ___  _  __/ __ \/ / / / __ \
+  / /| | / __ \/ _ \| |/_/ /_/ / /_/ / /_/ /
+ / ___ |/ /_/ /  __/>  </ ____/ __  / ____/
+/_/  |_/ .___/\___/_/|_/_/   /_/ /_/_/
+      /_/
+
+ASCII;
+
+echo "\033[36m{$banner}\033[0m\n";
+echo "\033[33mApexPHP Framework - Professional PHP Framework\033[0m\n\n";
+
+$console = new Console();
+$console->run();
